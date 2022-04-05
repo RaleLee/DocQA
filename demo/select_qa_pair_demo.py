@@ -6,18 +6,23 @@ from sentence_transformers import SentenceTransformer, util
 
 class SearchCachedQAListDemo(nn.Module):
     def __init__(
-            self, top: int,
-            model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2'
+            self, top: int, rate: float,
+            recall_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+            nli_model_path: str = 'sentence-transformers/xlm-r-100langs-bert-base-nli-stsb-mean-tokens'
     ):
         """
         Init a search cached QA list demo with sentenceBERT.
         In case of chinese doc, using a multilingual version
         :param top: return rank top n
-        :param model_path: choose model version for sentenceBERT.
+        :param rate: a select rate for confidence
+        :param recall_model_path: choose model version for sentenceBERT
+        :param nli_model_path: choose model version for NLI model.
         """
         super(SearchCachedQAListDemo, self).__init__()
-        self.model = SentenceTransformer(model_path)
+        self.model = SentenceTransformer(recall_model_path)
         self.top = top
+        self.rate = rate
+        self.nli_model = SentenceTransformer(nli_model_path)
 
     def forward(self, user_queries: List[str], cached_queries: List[str], return_score: bool = False) -> dict:
         """
@@ -29,7 +34,7 @@ class SearchCachedQAListDemo(nn.Module):
         """
         user_queries_embedding = self.model.encode(user_queries, convert_to_tensor=True, normalize_embeddings=True)
         cached_queries_embedding = self.model.encode(cached_queries, convert_to_tensor=True, normalize_embeddings=True)
-
+        # Recall
         # compute dot dot_score
         # return tensor convert to list
         dot_scores = util.dot_score(user_queries_embedding, cached_queries_embedding).cpu().numpy().tolist()
@@ -39,7 +44,10 @@ class SearchCachedQAListDemo(nn.Module):
             tmp_score = dot_score[:]
             rank = []
             for _ in range(self.top):
-                idx = tmp_score.index(max(tmp_score))
+                ms = max(tmp_score)
+                if ms < self.rate:
+                    break
+                idx = tmp_score.index(ms)
                 tmp_score[idx] = 0
                 rank.append(cached_queries[idx])
             rank_ret.append(rank)
@@ -47,12 +55,30 @@ class SearchCachedQAListDemo(nn.Module):
         ret = {'sentence_rank': rank_ret}
         if return_score:
             ret['rank_scores'] = dot_scores
+
+        # Select TOP 1
+        nli_user = self.nli_model.encode(user_queries, convert_to_tensor=True, normalize_embeddings=True)
+        nli_cache = [self.nli_model.encode(r, convert_to_tensor=True, normalize_embeddings=True)
+                     if len(r) > 0 else None for r in rank_ret]
+        top = []
+        for i, us in enumerate(nli_user):
+            if nli_cache[i] is None:
+                top.append(None)
+                continue
+            nli_score = util.dot_score(us, nli_cache[i]).squeeze(0).cpu().numpy().tolist()
+            top_score = max(nli_score)
+            if top_score < self.rate:
+                top.append(None)
+                continue
+            top.append((rank_ret[i][nli_score.index(top_score)], top_score))
+        ret['top'] = top
         return ret
 
 
 if __name__ == '__main__':
-    search_demo = SearchCachedQAListDemo(top=3)
-    user = ["故宫在哪个城市", "怎么去天安门"]
+    search_demo = SearchCachedQAListDemo(top=3, rate=0.7)
+    # Change user questions and system cached questions here
+    user = ["故宫在哪个城市", "怎么去天安门", "北京有什么好玩的", "今年清明节放假么", "疫情什么时候开始的"]
     sys_cached = ["故宫门票怎么预约", "故宫门票多少钱", "天安门广场怎么走", "故宫养心殿勤政亲贤匾额是由谁写的", "故宫博物院在哪"]
 
     result = search_demo(user, sys_cached, return_score=True)
@@ -68,3 +94,8 @@ if __name__ == '__main__':
         for sys_c, sc in zip(sys_cached, score):
             print(sys_c + " " + str(sc))
         print()
+
+    # see the top
+    top1 = result['top']
+    for u, t in zip(user, top1):
+        print("User's query: " + u + " Find: " + (t[0] + " score: " + str(t[1]) if t is not None else "None"))
