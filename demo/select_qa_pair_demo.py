@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer, util
 
 class SearchCachedQAListDemo(nn.Module):
     def __init__(
-            self, top: int, rate: float,
+            self, top: int, recall_rate: float, top_rate: float,
             recall_model_path: str = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
             nli_model_path: str = 'sentence-transformers/xlm-r-100langs-bert-base-nli-stsb-mean-tokens'
     ):
@@ -14,14 +14,16 @@ class SearchCachedQAListDemo(nn.Module):
         Init a search cached QA list demo with sentenceBERT.
         In case of chinese doc, using a multilingual version
         :param top: return rank top n
-        :param rate: a select rate for confidence
+        :param recall_rate: a select rate for recall confidence
+        :param top_rate: a select rate for top1 confidence
         :param recall_model_path: choose model version for sentenceBERT
         :param nli_model_path: choose model version for NLI model.
         """
         super(SearchCachedQAListDemo, self).__init__()
         self.model = SentenceTransformer(recall_model_path)
         self.top = top
-        self.rate = rate
+        self.recall_rate = recall_rate
+        self.top_rate = top_rate
         self.nli_model = SentenceTransformer(nli_model_path)
 
     def forward(self, user_queries: List[str], cached_queries: List[str], return_score: bool = False) -> dict:
@@ -45,7 +47,7 @@ class SearchCachedQAListDemo(nn.Module):
             rank = []
             for _ in range(self.top):
                 ms = max(tmp_score)
-                if ms < self.rate:
+                if ms < self.recall_rate:
                     break
                 idx = tmp_score.index(ms)
                 tmp_score[idx] = 0
@@ -67,7 +69,7 @@ class SearchCachedQAListDemo(nn.Module):
                 continue
             nli_score = util.dot_score(us, nli_cache[i]).squeeze(0).cpu().numpy().tolist()
             top_score = max(nli_score)
-            if top_score < self.rate:
+            if top_score < self.top_rate:
                 top.append(None)
                 continue
             top.append((rank_ret[i][nli_score.index(top_score)], top_score))
@@ -76,26 +78,30 @@ class SearchCachedQAListDemo(nn.Module):
 
 
 if __name__ == '__main__':
-    search_demo = SearchCachedQAListDemo(top=3, rate=0.7)
+    search_demo = SearchCachedQAListDemo(top=3, recall_rate=0.6, top_rate=0.7)
     # Change user questions and system cached questions here
     user = ["故宫在哪个城市", "怎么去天安门", "北京有什么好玩的", "今年清明节放假么", "疫情什么时候开始的"]
     sys_cached = ["故宫门票怎么预约", "故宫门票多少钱", "天安门广场怎么走", "故宫养心殿勤政亲贤匾额是由谁写的", "故宫博物院在哪"]
 
     result = search_demo(user, sys_cached, return_score=True)
     # see the ranking result
+    print("Recall list")
     sen_ranks = result['sentence_rank']
-    for sen in sen_ranks:
-        print(sen)
+    for u, sen in zip(user, sen_ranks):
+        print("User's query: " + u)
+        print("Recalls: " + str(sen))
+
+    # see the top
+    print("Find Top1")
+    top1 = result['top']
+    for u, t in zip(user, top1):
+        print("User's query: " + u + " Find: " + (t[0] + " score: " + str(t[1]) if t is not None else "None"))
 
     # see the scores
+    print("Recall Scores")
     scores = result['rank_scores']
     for u, score in zip(user, scores):
         print("User's query: " + u)
         for sys_c, sc in zip(sys_cached, score):
             print(sys_c + " " + str(sc))
         print()
-
-    # see the top
-    top1 = result['top']
-    for u, t in zip(user, top1):
-        print("User's query: " + u + " Find: " + (t[0] + " score: " + str(t[1]) if t is not None else "None"))
